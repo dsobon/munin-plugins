@@ -1,0 +1,60 @@
+#!/bin/sh
+# -*- sh -*-
+
+: << =cut
+
+=head1 NAME
+
+mysql_data_size - Monitor mysql data size
+
+=head1 CONFIGURATION
+
+No configuration
+
+=head1 AUTHOR
+
+David Sobon <d@sobon.org>
+
+=head1 LICENSE
+
+public domain license
+
+=head1 MAGIC MARKERS
+
+ #%# family=auto
+ #%# capabilities=autoconf
+
+=cut
+
+###. $MUNIN_LIBDIR/plugins/plugin.sh
+
+if [ "$1" = "autoconf" ]; then
+	# todo: make dir configurable?
+	if [ -d "/var/lib/mysql" ]; then
+		echo yes
+		exit 0
+	else
+		echo "no (no /var/lib/mysql)"
+		exit 0
+	fi
+fi
+
+if [ "$1" = "config" ]; then
+
+	echo 'graph_title MySQL MyISAM data size'
+	echo 'graph_args -l 0 --base 1000'
+	echo 'graph_vlabel size bytes'
+	echo 'graph_category mysql2'
+	echo 'mysql_data.label index'
+	echo 'mysql_data.draw AREA'
+	echo 'mysql_data.min 0'
+
+	exit 0
+fi
+
+SIZE=0
+for LINE in $(/usr/bin/sudo /usr/bin/find /var/lib/mysql -name "*.MYD" -printf "%s\n"); do
+	SIZE=$((SIZE + $LINE))
+done
+
+echo "mysql_data.value $SIZE"
