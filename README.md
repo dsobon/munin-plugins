@@ -23,6 +23,23 @@ apache logging format modified to:
 LogFormat "%v %{X-Real-IP}i %l %u %t \"%r\" %>s %b %D \"%{Referer}i\" \"%{User-Agent}i\"" vhost_combined
 ```
 
+screenshots
+-----------
+
+![apache response count - day](https://raw.github.com/dsobon/munin-plugins/master/img/apache_response_count-day.png)
+![apache response count - year](https://raw.github.com/dsobon/munin-plugins/master/img/apache_response_count-year.png)
+![apache response http status - day](https://raw.github.com/dsobon/munin-plugins/master/img/apache_response_http_status-day.png)
+![apache response http status - year](https://raw.github.com/dsobon/munin-plugins/master/img/apache_response_http_status-year.png)
+![apache response time max - day](https://raw.github.com/dsobon/munin-plugins/master/img/apache_response_time_max-day.png)
+![apache response time max - year](https://raw.github.com/dsobon/munin-plugins/master/img/apache_response_time_max-year.png)
+![apache response time percentile dynamic - month](https://raw.github.com/dsobon/munin-plugins/master/img/apache_response_time_percentile_dynamic-month.png)
+![apache response time percentile dynamic - year](https://raw.github.com/dsobon/munin-plugins/master/img/apache_response_time_percentile_dynamic-year.png)
+![apache response time percentile static - day](https://raw.github.com/dsobon/munin-plugins/master/img/apache_response_time_percentile_static-day.png)
+![apache response time percentile static - year](https://raw.github.com/dsobon/munin-plugins/master/img/apache_response_time_percentile_static-year.png)
+![apache response time total - day](https://raw.github.com/dsobon/munin-plugins/master/img/apache_response_time_total-day.png)
+![apache response time total - year](https://raw.github.com/dsobon/munin-plugins/master/img/apache_response_time_total-year.png)
+
+
 installation
 ------------
 ```
@@ -35,6 +52,7 @@ $ sudo ln -fs /usr/share/munin/plugins/apache_response apache_response_time_perc
 $ sudo ln -fs /usr/share/munin/plugins/apache_response apache_response_time_percentile_static
 $ sudo ln -fs /usr/share/munin/plugins/apache_response apache_response_time_total
 ```
+
 
 limitations
 -----------
