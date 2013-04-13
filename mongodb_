@@ -1,0 +1,477 @@
+#!/usr/bin/perl -w
+#  about: graph mongodb status
+# author: David Sobon <d@sobon.org>
+#   date: 26 Mar 2013
+#####
+# example (based on official mongo* plugin): http://www.face2control.com/mongodb-day.html
+#####
+# note: it appears graph_period must be set in munin.conf (not munin-node.conf) on a per node basis.
+# thus, any defined references to graph_period in this plugin source is (presumably) superfluous.
+#
+# example:
+#
+# [MONGODB]
+#     address         10.0.1.8
+#     use_node_name   yes
+#     mongodb_btree.graph_period minute
+#####
+
+use strict;
+use vars qw($json);
+use Munin::Common::Defaults;
+use LWP::Simple;
+use JSON;
+
+&main();
+
+sub main {
+	my $arg = shift(@ARGV);
+	# arg == autoconf
+	# arg == suggest
+	# arg == config
+
+	#
+	# no sub plugin defined.
+	#
+	$0 =~ m#\/mongodb_(.+)*$#;
+	my $prog = $1;
+	die "error: no sub-plugin defined\n" unless defined $prog;
+
+	#
+	# get and decode from json-encoded data from mongodb
+	#
+	$json = &get_mongodb_json();
+
+	#
+	# btree.
+	#
+	if ($prog =~ m#^btree$#) {
+		&do_btree("data")   if (!$arg);
+		&do_btree("config") if ($arg && $arg =~ m#^config$#);
+		return;
+	}
+
+	#
+	# memory.
+	#
+	if ($prog =~ m#^memory$#) {
+		&do_memory("data")   if (!$arg);
+		&do_memory("config") if ($arg && $arg =~ m#^config$#);
+		return;
+	}
+
+	#
+	# command.
+	#
+	if ($prog =~ m#^command$#) {
+		&do_command("data")   if (!$arg);
+		&do_command("config") if ($arg && $arg =~ m#^config$#);
+		return;
+	}
+
+	#
+	# connections.
+	#
+	if ($prog =~ m#^connections$#) {
+		&do_connections("data")   if (!$arg);
+		&do_connections("config") if ($arg && $arg =~ m#^config$#);
+		return;
+	}
+
+	#
+	# flush_time.
+	#
+	if ($prog =~ m#^flush_time$#) {
+		&do_flush_time("data")   if (!$arg);
+		&do_flush_time("config") if ($arg && $arg =~ m#^config$#);
+		return;
+	}
+
+	#
+	# commits_writelock.
+	#
+	if ($prog =~ m#^commits_writelock$#) {
+		&do_commits_writelock("data")   if (!$arg);
+		&do_commits_writelock("config") if ($arg && $arg =~ m#^config$#);
+		return;
+	}
+
+	#
+	# lock_time.
+	#
+	if ($prog =~ m#^lock_time$#) {
+		&do_lock_time("data")   if (!$arg);
+		&do_lock_time("config") if ($arg && $arg =~ m#^config$#);
+		return;
+	}
+
+	#
+	# lock(ing|ed)_(read|write).
+	#
+	if ($prog =~ m#^(locking|locked)_(read|write)$#) {
+		my $l = $1;
+		my $a = $2;
+		&do_lock("data", $l, $a)   if (!$arg);
+		&do_lock("config", $l, $a) if ($arg && $arg =~ m#^config$#);
+		return;
+	}
+
+	die "error: not a valid sub-plugin\n";
+}
+
+#####
+# Usage: &get_mongodb_json();
+#
+sub get_mongodb_json {
+	my $file = sprintf("%s/%s/mongodb.state", $Munin::Common::Defaults::MUNIN_PLUGSTATE, $Munin::Common::Defaults::MUNIN_PLUGINUSER);
+	my $cache = 0;
+	my $data;
+
+	if ( -e $file ) {
+		# todo: check return of stat();
+		my $stat = (stat($file))[10];
+
+		#
+		# cache hit!
+		#
+		if (time() - $stat < 150) {
+			# todo: check return of open();
+			open(IN,$file);
+			while (<IN>) {
+				$data .= $_;
+			}
+			close(IN);
+			$cache = 1;
+		}
+	}
+
+	#
+	# cache MISS!
+	#
+	if (!$cache) {
+		my $host = $ENV{'MONGODB_HOST'} || "127.0.0.1";
+		my $port = $ENV{'MONGODB_PORT'} || 27017;
+		my $url  = sprintf("http://%s:%s/_status", $host, $port + 1000);
+		$data    = get( $url );
+		die "error: could not retrieve data from url $url\n" unless ($data);
+
+		#
+		# save cache
+		#
+		if (open(OUT,">$file")) {
+			print OUT $data;
+			close(OUT);
+		} else {
+			print "warn: write to file $file failed.\n";
+		}
+	}
+
+	#
+	# decode json
+	#
+	$json = decode_json($data);
+	die "error: could not decode json\n" unless ($json);
+
+#	use Data::Dumper;
+#	print Dumper($json);
+
+	return $json;
+}
+
+#####
+# Usage: &do_lock($arg, locking|locked, read|write);
+#
+sub do_lock {
+	my($arg, $lock, $access) = @_;
+
+	my $x = $json->{'serverStatus'}->{'locks'};
+
+	#
+	# config.
+	#
+	if ($arg =~ m#^config$#) {
+		print "graph_title MongoDB $lock ($access)\n";
+		print "graph_args --base 1000 -l 0\n";
+		print "graph_vlabel lock time (msec) per \${graph_period}\n";
+		print "graph_category MongoDB\n";
+		print "graph_total total\n";
+
+		foreach my $k (sort keys %{ $x }) {
+			next if ($k =~ m#^\.$#);
+
+			printf "%s.label %s\n", $k, $k;
+			printf "%s.draw AREASTACK\n", $k;
+			printf "%s.type COUNTER\n", $k;
+			printf "%s.graph_period minute\n", $k;
+		}
+
+		return;
+	}
+
+	# convert input (and at the same time, we indirectly make it valid)
+	$lock   = ($lock =~ /^locking$/) ? "timeAcquiringMicros" : "timeLockedMicros";
+	$access = ($access =~ /^r/) ? "r" : "w";
+
+	#
+	# data.
+	#
+	foreach my $k (sort keys %{ $x }) {
+		next if ($k =~ m#^\.$#);
+		printf "%s.value %d\n", $k, ($x->{$k}->{$lock}->{$access}/1000);
+	}
+
+	return;
+}
+
+#####
+# Usage: &do_commits_writelock();
+#
+sub do_commits_writelock {
+	my($arg) = @_;
+
+	my $v = $json->{'serverStatus'}->{'dur'}->{'commitsInWriteLock'};
+
+	#
+	# config.
+	#
+	if ($arg =~ m#^config$#) {
+		print "graph_title MongoDB Commits in Write Lock\n";
+		print "graph_args --base 1000 -l 0\n";
+		print "graph_vlabel count per \${graph_period}\n";
+		print "graph_category MongoDB\n";
+
+		print "commits_writelock.label Commits\n";
+		print "commits_writelock.draw AREA\n";
+		print "commits_writelock.type COUNTER\n";
+
+		return;
+	}
+
+	#
+	# data.
+	#
+	printf "commits_writelock.value %d\n", $v;
+
+	return;
+}
+
+#####
+# Usage: &do_lock_time();
+#
+sub do_lock_time {
+	my($arg) = @_;
+
+	my $v = $json->{'serverStatus'}->{'globalLock'}->{'lockTime'};
+
+	#
+	# config.
+	#
+	if ($arg =~ m#^config$#) {
+		print "graph_title MongoDB Lock Time Contention\n";
+		print "graph_args --base 1000 -l 0\n";
+		print "graph_vlabel msec per \${graph_period}\n";
+		print "graph_category MongoDB\n";
+
+		print "lock.label lock time\n";
+		print "lock.draw LINE2\n";
+		print "lock.type COUNTER\n";
+		print "lock.graph_period minute\n";
+
+		return;
+	}
+
+	#
+	# data.
+	#
+	printf "lock.value %d\n", ($v/1000);
+
+	return;
+}
+
+#####
+# Usage: &do_flush_time();
+#
+sub do_flush_time {
+	my($arg) = @_;
+
+	my $x = $json->{'serverStatus'}->{'backgroundFlushing'};
+	my %x = %{ $x };
+
+	#
+	# config.
+	#
+	if ($arg =~ m#^config$#) {
+		print "graph_title MongoDB Flush Time\n";
+		print "graph_args --base 1000 -l 0\n";
+		print "graph_vlabel msec\n";
+		print "graph_category MongoDB\n";
+
+		print "average_ms.label Average Flush time (msec)\n";
+		print "average_ms.draw LINE1\n";
+
+		print "last_ms.label Last Flush time (msec)\n";
+		print "last_ms.draw AREA\n";
+
+		return;
+	}
+
+	#
+	# data.
+	#
+	foreach my $k (qw(average_ms last_ms)) {
+		printf "%s.value %.2f\n", $k, $x->{ $k };
+	}
+
+	return;
+}
+
+#####
+# Usage: &do_connections();
+#
+sub do_connections {
+	my($arg) = @_;
+
+	my $x = $json->{'serverStatus'}->{'connections'};
+	my %x = %{ $x };
+
+	#
+	# config.
+	#
+	if ($arg =~ m#^config$#) {
+		print "graph_title MongoDB Connections\n";
+		print "graph_args --base 1000 -l 0\n";
+		print "graph_vlabel count\n";
+		print "graph_category MongoDB\n";
+
+		print "connections.label Connections\n";
+		print "connections.draw AREA\n";
+
+		return;
+	}
+
+	#
+	# data.
+	#
+	printf "connections.value %d\n", $x->{'current'};
+
+	return;
+}
+
+#####
+# Usage: &do_command();
+#
+sub do_command {
+	my($arg) = @_;
+
+	my $x = $json->{'serverStatus'}->{'opcounters'};
+	my %x = %{ $x };
+
+	#
+	# config.
+	#
+	if ($arg =~ m#^config$#) {
+		print "graph_title MongoDB Commands\n";
+		print "graph_args --base 1000 -l 0\n";
+		print "graph_vlabel commands per \${graph_period}\n";
+		print "graph_category MongoDB\n";
+
+		foreach my $k (keys %x) {
+			printf "%s.label %s\n", $k, $k;
+			printf "%s.min 0\n", $k;
+			printf "%s.max 500000\n", $k;
+			printf "%s.type COUNTER\n", $k;
+			printf "%s.draw AREASTACK\n", $k;
+		}
+
+		return;
+	}
+
+	#
+	# data.
+	#
+	foreach my $k (keys %x) {
+		printf "%s.value %d\n", $k, $x{$k};
+	}
+
+	return;
+}
+
+#####
+# Usage: &do_memory();
+#
+sub do_memory {
+	my($arg) = @_;
+
+	my $x = $json->{'serverStatus'}->{'mem'};
+	my %x = %{ $x };
+
+	#
+	# config.
+	#
+	if ($arg =~ m#^config$#) {
+		print "graph_title MongoDB memory usage\n";
+		print "graph_args --base 1024 -l 0 --vertical-label Bytes\n";
+		print "graph_category MongoDB\n";
+
+		foreach my $k (qw(resident virtual mapped)) {
+			next unless (exists($x{$k}));
+
+			printf "%s.label %s\n", $k, $k;
+			printf "%s.draw LINE2\n", $k;
+		}
+
+		return;
+	}
+
+	#
+	# data.
+	#
+	foreach my $k (qw(resident virtual mapped)) {
+		printf "%s.value %d\n", $k, ($x{$k}*1024*1024);
+	}
+
+	return;
+}
+
+#####
+# Usage: &do_btree();
+#
+sub do_btree {
+	my($arg) = @_;
+
+	my $x = $json->{'serverStatus'}->{'indexCounters'}->{'btree'};
+	my %x = %{ $x };
+
+	#
+	# config.
+	#
+	if ($arg =~ m#^config$#) {
+		print "graph_title MongoDB btree stats\n";
+		print "graph_args --base 1000 -l 0\n";
+		print "graph_vlabel per \${graph_period}\n";
+		print "graph_category MongoDB\n";
+		print "graph_total accesses\n";
+
+		# accesses = hits + misses + resets
+		# missRatio = miss / (miss + hit)
+		foreach my $k (qw(hit misses resets)) {
+			printf "%s.label %s\n", $k, $k;
+			printf "%s.min 0\n", $k;
+			printf "%s.type COUNTER\n", $k;
+			printf "%s.draw AREASTACK\n", $k;
+		}
+
+		return;
+	}
+
+	#
+	# data.
+	#
+	foreach my $k (qw(hit misses resets)) {
+		printf "%s.value %s\n", $k, $x->{$k};
+	}
+
+	return;
+}
+
+exit 0;
