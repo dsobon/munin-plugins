@@ -1,0 +1,778 @@
+#!/usr/bin/perl -w
+#  about: Analyse apache response times, and create munin plugin output
+# author: David Sobon <d@sobon.org>
+#   date: 10 Sep 2011
+#####
+# a further 20 mS processing time can be removed by loading modules
+# only when full-processing is performed.
+#
+
+use strict;
+use warnings;
+use vars qw(%stats $state $statefile);
+
+&main();
+exit(0);
+
+##########################################################################
+# SUB ROUTINES
+##########################################################################
+
+#####
+#  Usage: &main();
+# Return: NULL.
+#
+sub main {
+	# todo: configurable apachelog file var.
+	$statefile = "/var/lib/munin/plugin-state/apache-response-time.state";
+
+	#
+	# determine mode through exec name.
+	#
+	if ($0 !~ m#apache_response_(\S+)$#) {
+		print "::: error: could not parse exec name: $0\n";
+		die();
+	}
+	my $mode = $1;
+
+	#
+	# check for mode.
+	#
+	if ($mode !~ m#^time_total$# &&
+	    $mode !~ m#^time_max$# &&
+	    $mode !~ m#^count$# &&
+	    $mode !~ m#^time_percentile_(dynamic|static)$# &&
+	    $mode !~ m#^http_status$#
+	) {
+		print "::: error: incorrect mode: $mode\n";
+		die();
+	}
+
+	#
+	# arg: config.
+	#
+	my $arg = shift(@ARGV);
+	if ($arg && $arg =~ m#^config$#) {
+		&do_config( $mode );
+		exit(0);
+	}
+
+	#
+	# check if statefile is old.
+	#
+	if ( -f $statefile ) {
+		my $stat = time() - (stat($statefile))[9];
+		if ($stat > 3*60) {
+			unlink $statefile;
+		}
+	}
+
+	#
+	# if state is not stale, check if we can use it.
+	#
+	if ( -f $statefile ) {
+		my $error = 1;
+
+		for (1..2) {
+			$state = &read_state();
+
+			if ($state->{'_status'} && $state->{'_status'} =~ /^OK$/) {
+				$error = 0;
+				last;
+			}
+
+			sleep(1);
+		}
+
+		#
+		# ok... we waited too long, dont use the statefile.
+		#
+		if ($error) {
+			unlink $statefile;
+		}
+	}
+
+	#
+	# no statefile... so do all the heavy work.
+	#
+	if (! -f $statefile) {
+		eval "use Time::Local;";
+		eval "use POSIX qw(strftime);";
+
+		&clear_state();
+		&do_processing();
+
+		#
+		# all possible modes.
+		#
+		my @mode = qw(
+			dynamic-percentile
+			dynamic-time-total
+			dynamic-time-max
+			dynamic-count
+
+			static-percentile
+			static-time-total
+			static-time-max
+			static-count
+
+			http-status
+		);
+
+		foreach my $_mode (@mode) {
+			&make_results($_mode);
+		}
+
+		&write_state("_status", "OK");
+		$state = &read_state();
+	}
+
+	#
+	# munin-plugin
+	#
+	&do_result( $mode );
+
+	exit(0);
+}
+
+#####
+#  Usage: &make_results();
+# Return: NULL.
+#
+sub make_results {
+	my ($mode) = @_;
+	$mode      =~ s#-#_#g;
+
+###	print ":::\n";
+###	print "::: DEBUG: mode: $mode\n";
+
+	#
+	# mode: {dynamic,static}-percentile
+	#
+	if ($mode =~ m#^(dynamic|static)[_-]percentile$#) {
+		my $type       = $1;
+		my @sort       = sort { $a <=> $b } @{ $stats{'*'}{ $type } };
+		my @percentile = qw(25 50 75 90 95 99);
+
+		foreach my $i (@percentile) {
+			my $idx = int((scalar(@sort)-1)*$i/100);
+###			printf "::: DEBUG: %dth percentile: sort[$idx] == %d\n", $i, $sort[$idx];
+			&write_state( sprintf("_%s.%d", $mode, $i), $sort[$idx] );
+		}
+
+		return;
+	}
+
+	#
+	# mode: {dynamic,static}-time-max
+	#
+	if ($mode =~ m#^(dynamic|static)[_-]time[_-]max$#) {
+		my $type       = $1;
+		my @sort       = sort { $a <=> $b } @{ $stats{'*'}{ $type } };
+
+###		printf "::: DEBUG: max: %d\n", $sort[-1];
+		&write_state( sprintf("_%s", $mode), $sort[-1] );
+
+		return;
+	}
+
+	#
+	# mode: {dynamic,static}-count
+	#
+	if ($mode =~ m#^(dynamic|static)[_-]count$#) {
+		my $type       = $1;
+		my $count      = scalar( @{ $stats{'*'}{ $type } } );
+
+###		printf "::: DEBUG: count: %d\n", $count;
+		&write_state( sprintf("_%s", $mode), $count );
+
+		return;
+	}
+
+	#
+	# mode: {dynamic,static}-time-total
+	#
+	if ($mode =~ m#^(dynamic|static)[_-]time[_-]total$#) {
+		my $type = $1;
+
+		foreach my $time (@{ $stats{'*'}{ $type } }) {
+###			print "::: DEBUG: _time_total.$type += $time;\n";
+			$stats{'_time_total'}{ $type } += $time;
+		}
+
+###		printf "::: DEBUG: _time_total.time.$type == %d\n",
+###			$stats{'_total_realtime'}{ $type };
+		&write_state(
+			sprintf("_%s.time", $mode),
+			$stats{'_time_total'}{ $type }
+		);
+
+###		printf "::: DEBUG: _time_total.ratio.$type == %.4f\n",
+###			$stats{'_time_total'}{ $type } / 300_000_000;
+		&write_state(
+			sprintf("_%s.ratio", $mode),
+			sprintf("%.2f", 100 * $stats{'_time_total'}{ $type } / 300_000_000)
+		);
+
+		return;
+	}
+
+	#
+	# mode: total-status
+	#
+	if ($mode =~ m#^http[_-]status$#) {
+		foreach my $status (sort keys %{ $stats{'_http_status'} }) {
+###			printf "::: DEBUG: _http_status.%d == %d\n",
+###				$status,
+###				$stats{'_http_status'}{ $status }
+###			;
+
+			&write_state(
+				sprintf("_%s.%s", $mode, $status),
+				$stats{'_http_status'}{ $status }
+			);
+		}
+
+		return;
+	}
+
+	#
+	# mode: UNKNOWN.
+	#
+	print "::: error: unknown mode: $mode\n";
+	return 1;
+}
+
+#####
+#  Usage: &do_processing();
+# Return: NULL.
+#
+sub do_processing {
+	#
+	# prepare vars.
+	#
+	my $accesslog = "/var/log/apache2/access.log";
+	if (!open(ACCESSLOG,$accesslog)) {
+		print "::: error: open accesslog $accesslog failed - $!\n";
+		die();
+	}
+	my $filesize  = -s $accesslog;
+	my $seek      = 0;
+	my $bisect    = 2;
+	my $utime     = &get_time_5min_ago();
+	my $datetime  = &get_datetime_regex($utime);
+	my $edatetime = &get_datetime_end($utime+(60*5)+5);
+
+###	printf "::: DEBUG: time: %s\n", scalar(localtime($utime));
+###	print  "::: DEBUG: datetime_regex: $datetime\n";
+
+	#
+	# quickly find position of relevant data.
+	#
+	while (1) {
+		my $line = <ACCESSLOG>;
+###		chop($line);
+		next unless ($line);
+
+		# dom,moy,y,h,m,s
+		if ($line !~ m#\[(\d{2})/(\S{3})/(\d{4}):(\d{2}):(\d{2}):(\d{2})#) {
+			print "::: warn: could not parse line for date: $line\n";
+			sleep(1);
+			die();
+		}
+		my @logtime = ($6,$5,$4, $1,$2,($3-1900)); # s,m,h, dom,moy,y
+		$logtime[4] = &get_month2idx( $logtime[4] );
+		my $logtime = timelocal(@logtime);
+		my $delta   = $utime - $logtime;
+
+		#
+		# recalculate seek.
+		#
+		my $offset = int($filesize/$bisect);
+		if ($delta >= 10) {
+			$seek += $offset;
+		} else {
+			$seek -= $offset;
+		}
+
+		#
+		# out of range seek.
+		#
+		if ($seek > $filesize) {
+			$seek = $filesize - 1000;
+###			print "::: warn: seek out of range: seek > filesize;\n";
+		}
+
+		if ($seek < 0) {
+			$seek = 0;
+###			print "::: warn: seek out of range: seek < 0;\n";
+		}
+
+		$bisect *= 2;
+###		print "::: DEBUG: delta == $delta, seeking to $seek\n";
+		seek(ACCESSLOG,$seek,0);
+		<ACCESSLOG>; # when seeking, consider seeked line as incomplete.
+
+		#
+		# limit the number of bisections.
+		#
+		if ($offset < 200 || $bisect > $filesize) {
+###			print "::: bisect > filesize; breaking loop.\n";
+			last;
+		}
+	}
+
+	#
+	# now do the grunt work.
+	#
+	while (<ACCESSLOG>) {
+		#
+		# check for valid line.
+		#
+		# LogFormat "%v %{X-Real-IP}i %l %u %t \"%r\" %>s %b %D \"%{Referer}i\" \"%{User-Agent}i\"" vhost_combined
+		# localhost - - - [24/Jan/2012:00:54:51 +1100] "GET /probe.html HTTP/1.1" 200 - 276 "-" "-"
+		#
+		if (!m#^(\S+?) (\S+?) -\s-\s(\[.*?\])\s(.*?)\s(\d+)\s(\S+)\s(\d+)\s"(.*?)"\s"(.*?)"#) {
+			print "::: warn: could not parse: $_";
+			next;
+		}
+		my $host   = $1;
+		my $ip     = $2;
+		my $date   = $3;
+		my $url    = $4;
+		my $status = $5;
+		my $bytes  = $6;
+		my $time   = $7;
+
+		#
+		# dont scan beyond datetime range.
+		#
+		if ($date =~ m#$edatetime#) {
+			last;
+		}
+
+		#
+		# match for datetime.
+		#
+		next unless ($date =~ m#$datetime#);
+
+		#
+		# parse request string.
+		#
+		if ($url !~ m#^"(\w+)\s(\S+)\s(\S+)"$#) {
+			print "::: warn: could not parse url: $url\n";
+			next;
+		}
+		my $method      = $1;
+		my $script_path = $2;
+		my $protocol    = $3;
+
+		#
+		# GRUNT GRUNT GRUNT!
+		#
+		&parse_apachelog_data($host, $script_path, $time, $date, $status);
+	}
+
+	close(ACCESSLOG);
+
+	return;
+}
+
+#####
+#  Usage: &parse_apachelog_data($host, $script, $time, $date, $status);
+# Return: NULL.
+#
+sub parse_apachelog_data {
+	my (@data) = @_;
+	my $type   = "dynamic";
+	my $host   = $data[0];
+	my $script = $data[1];
+	my $time   = $data[2];
+	my $date   = $data[3];
+	my $status = $data[4];
+
+	# data[0] == host
+	# data[1] == file
+	# data[2] == time (uS)
+	# data[3] == date
+	# data[4] == status
+
+###	print ":::\n";
+###	for (my $i=0; $i<scalar(@data); $i++) {
+###		printf "::: DEBUG: parse_apachelog_data: data[%d] == %s\n", $i, $data[$i];
+###	}
+
+	#
+	# invalid script.
+	#
+	if ($script !~ m#/#) {
+###		print "::: warn: parse_apachelog_data: script does not contain slash: $script\n";
+		return;
+	}
+
+	#
+	# now determine what's static.
+	#
+	$type = "static" if ($script =~ m#\.(png|gif|css|js|jpe?g|ico)(\?|$)#i);
+
+	#
+	# exclude by host.
+	#
+	my @exclude = qw(localhost);
+	if (grep(/^$host$/, @exclude)) {
+###		print "::: DEBUG: parse_apachelog_data: exclude by host: $host\n";
+		return;
+	}
+
+	#
+	# store stats.
+	#
+###	printf "::: DEBUG: stats{ %s }{ %s }[] = %d  (%s)\n", $host, $type, $time, $script;
+	push(@{ $stats{ $host }{ $type } }, $time);
+	push(@{ $stats{'*'}{ $type } }, $time);
+	$stats{'_http_status'}{ $status }++;
+
+	return;
+}
+
+#####
+#  Usage: &get_month2idx( $month );
+# Return: $idx
+#
+sub get_month2idx {
+	my ($month) = @_;
+	my @month   = qw(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec);
+
+	for (my $i=0; $i<scalar(@month); $i++) {
+		next unless ($month[$i] eq $month);
+		return $i;
+	}
+
+	print "::: error: get_month2idx: month $month idx could not be found.\n";
+	die();
+}
+
+#####
+#  Usage: &get_time_5min_ago();
+# Return: $utime
+#
+sub get_time_5min_ago {
+	my $_time = time() - (5*60);
+	my @time  = localtime( $_time );
+	$time[1]  = (5*int($time[1]/5));
+	$time[0]  = 0;
+	my $time  = timelocal($time[0], $time[1], $time[2], $time[3], $time[4], $time[5]);
+
+	return $time;
+}
+
+#####
+#  Usage: &get_datetime_regex();
+# Return: DD/MMM/YYYY:HH:MM:SS regex string
+#
+sub get_datetime_regex {
+	my ($time) = @_;
+	my @time   = localtime( $time );
+	my @min;
+
+	#
+	# generate array of minutes.
+	#
+	for ($time[1]..$time[1]+(5-1)) {
+		push(@min, sprintf("%02d",$_));
+	}
+
+	my $string = strftime("%d/%b/%Y:%H:(%%s):%%s", @time);
+
+	return sprintf($string, join('|',@min), '\\d{2}');
+}
+
+#####
+#  Usage: &get_datetime_end();
+# Return: DD/MMM/YYYY:HH:MM:SS string
+#
+sub get_datetime_end {
+	my ($time) = @_;
+	my @time   = localtime( $time );
+	my $string = strftime("%d/%b/%Y:%H:%M:%S", @time);
+
+	return $string;
+}
+
+#####
+#  Usage: &write_state($key, $val);
+# Return: NULL.
+#
+sub write_state {
+	my ($key, $val) = @_;
+
+	if (!open(STATE,">>$statefile")) {
+		return;
+	}
+
+###	printf "::: DEBUG: write_state: %s: %s\n", $key, $val;
+	printf STATE "%s: %s\n", $key, $val;
+	close(STATE);
+
+	return;
+}
+
+#####
+#  Usage: &write_state();
+# Return: NULL.
+#
+sub clear_state {
+	if (!open(STATE,">$statefile")) {
+		return;
+	}
+
+	close(STATE);
+
+	return;
+}
+
+#####
+#  Usage: &read_state();
+# Return: $hash{ $key1 } = $val;
+# Return: $hash{ $key1 }{ $key2 } = $val;
+#
+sub read_state {
+	my %hash;
+
+	if (!open(STATE,$statefile)) {
+		return;
+	}
+
+	while (<STATE>) {
+		chop;
+
+		#
+		# key1.key2: val
+		#
+		if (m#^(\S+?)\.(\S+?): (.*?)$#) {
+###			print "::: DEBUG: read_state: hash{ $1 }{ $2 } = $3;\n";
+			$hash{ $1 }{ $2 } = $3;
+			next;
+		}
+
+		#
+		# key: val
+		#
+		if (m#^(\S+?): (.*?)$#) {
+###			print "::: DEBUG: read_state: hash{ $1 } = $2;\n";
+			$hash{ $1 } = $2;
+			next;
+		}
+
+###		print "::: warn: read_state: unknown state line: $_\n";
+	}
+	close(STATE);
+
+	return \%hash;
+}
+
+######
+#  Usage: &do_result( $mode );
+# Return: NULL.
+#
+sub do_result {
+	my ($mode) = @_;
+
+	#
+	# mode: time_max
+	#
+	if ($mode =~ m#^time_max$#) {
+		printf "dynamic_$mode.value %d\n", $state->{ '_dynamic_'.$mode } / 1000;
+		printf "static_$mode.value %d\n",  $state->{ '_static_'.$mode }  / 1000;
+		return;
+	}
+
+	#
+	# mode: time_total
+	#
+	if ($mode =~ m#^time_total$#) {
+		printf "dynamic_$mode.value %.2f\n", $state->{ '_dynamic_'.$mode }{'time'} / 1000 / 1000;
+		printf "static_$mode.value %.2f\n",  $state->{ '_static_'.$mode }{'time'}  / 1000 / 1000;
+		return;
+	}
+
+	#
+	# mode: count
+	#
+	if ($mode =~ m#^count$#) {
+		printf "dynamic_$mode.value %d\n", $state->{ '_dynamic_'.$mode };
+		printf "static_$mode.value %d\n",  $state->{ '_static_'.$mode };
+		return;
+	}
+
+	#
+	# mode: time_percentile_{dynamic,static}
+	#
+	if ($mode =~ m#^time_percentile_(dynamic|static)$#) {
+		my $type = $1;
+		my @p    = qw(25 50 75 90 95 99);
+
+		for (my $i=0; $i<scalar(@p); $i++) {
+			my $k = sprintf("%s_%sth", $type, $p[$i]);
+			my $p = ($p[$i] =~ /^(\d+)/) ? $1 : 0;
+			my $v = $state->{'_'.$type.'_percentile'}{$p} / 1000;
+			printf "%s.value %.1f\n", $k, $v;
+		}
+
+		return;
+	}
+
+	#
+	# mode: http_status
+	#
+	if ($mode =~ m#^http_status$#) {
+		my @code = qw(301 302 403 404 503);
+
+		foreach my $code (@code) {
+			my $v = $state->{'_http_status'}{ $code } || 0;
+			printf "http_status_%d.value %d\n", $code, $v;
+		}
+
+		return;
+	}
+
+	#
+	# error.
+	#
+	print "::: error: do_result: unknown mode: $mode\n";
+	die();
+}
+
+######
+#  Usage: &do_config( $mode );
+# Return: NULL.
+#
+sub do_config {
+	my ($mode) = @_;
+	#
+	# mode: time_max
+	#
+	if ($mode =~ m#^time_max$#) {
+		print "graph_title Apache response time - maximum\n";
+		print "graph_args -r --lower-limit 0\n";
+		print "graph_vlabel mS\n";
+		print "graph_scale no\n";
+		print "graph_category apache\n";
+		print "graph_order dynamic_time_max static_time_max\n";
+
+		print "dynamic_time_max.label dynamic\n";
+		print "dynamic_time_max.draw AREA\n";
+		print "dynamic_time_max.min 0\n";
+		print "dynamic_time_max.type GAUGE\n";
+
+		print "static_time_max.label static\n";
+		print "static_time_max.draw STACK\n";
+		print "static_time_max.min 0\n";
+		print "static_time_max.type GAUGE\n";
+
+		return;
+	}
+
+	#
+	# mode: time_total
+	#
+	if ($mode =~ m#^time_total$#) {
+		print "graph_title Apache response time - total time\n";
+		print "graph_args -r --lower-limit 0\n";
+		print "graph_vlabel S\n";
+		print "graph_scale no\n";
+		print "graph_category apache\n";
+		print "graph_order dynamic_time_total static_time_total\n";
+
+		print "dynamic_time_total.label dynamic\n";
+		print "dynamic_time_total.draw AREA\n";
+		print "dynamic_time_total.min 0\n";
+		print "dynamic_time_total.type GAUGE\n";
+
+		print "static_time_total.label static\n";
+		print "static_time_total.draw STACK\n";
+		print "static_time_total.min 0\n";
+		print "static_time_total.type GAUGE\n";
+
+		return;
+	}
+
+	#
+	# mode: count
+	#
+	if ($mode =~ m#^count$#) {
+		print "graph_title Apache response time - responses served in 5 min\n";
+		print "graph_args -r --lower-limit 0\n";
+		print "graph_vlabel response\n";
+		print "graph_scale no\n";
+		print "graph_category apache\n";
+		print "graph_order static_count dynamic_count\n";
+
+		print "static_count.label static\n";
+		print "static_count.draw AREA\n";
+		print "static_count.min 0\n";
+		print "static_count.type GAUGE\n";
+
+		print "dynamic_count.label dynamic\n";
+		print "dynamic_count.draw STACK\n";
+		print "dynamic_count.min 0\n";
+		print "dynamic_count.type GAUGE\n";
+
+		return;
+	}
+
+	#
+	# mode: time_percentile_dynamic
+	# mode: time_percentile_static
+	#
+	if ($mode =~ m#^time_percentile_(dynamic|static)$#) {
+		my $type = $1;
+		print "graph_title Apache response time - percentile - $type\n";
+		print "graph_args -r --lower-limit 0\n";
+		print "graph_vlabel mS\n";
+		print "graph_scale no\n";
+		print "graph_category apache\n";
+
+		my @p = qw(25 50 75 90 95 99);
+		printf "graph_order %s\n", join(" ", map { sprintf("%s_%sth", $type, $_) } @p);
+
+		for (my $i=0; $i<scalar(@p); $i++) {
+			my $k = sprintf("%s_%sth", $type, $p[$i]);
+			printf "%s.label %sth\n", $k, $p[$i];
+			printf "%s.draw %s\n", $k, ($i == 0) ? "AREA" : "STACK";
+			printf "%s.min 0\n", $k;
+			printf "%s.type GAUGE\n", $k;
+		}
+
+		return;
+	}
+
+	#
+	# mode: http_status
+	#
+	if ($mode =~ m#^http_status$#) {
+		print "graph_title Apache response http codes\n";
+		print "graph_args -r --lower-limit 0\n";
+		print "graph_vlabel count\n";
+		print "graph_scale no\n";
+		print "graph_category apache\n";
+
+		my @code = qw(301 302 403 404 503);
+		printf "graph_order %s\n", join(" ", map { sprintf("http_status_%d", $_) } @code);
+
+		for (my $i=0; $i<scalar(@code); $i++) {
+			my $k = sprintf("http_status_%d", $code[$i]);
+			printf "%s.label %s\n", $k, $code[$i];
+			printf "%s.draw %s\n", $k, ($i == 0) ? "AREA" : "STACK";
+			printf "%s.min 0\n", $k;
+			printf "%s.type GAUGE\n", $k;
+		}
+
+		return;
+	}
+
+}
+
+#
+# THE END.
+#
