@@ -17,5 +17,5 @@ $ sudo ln -fs /usr/share/munin/plugins/mysql_index_size .
 screenshots
 -----------
 
+![mysql data size - year](https://raw.github.com/dsobon/munin-plugins/master/mysql_size/img/mysql_data_size-year.png)
 ![mysql index size - year](https://raw.github.com/dsobon/munin-plugins/master/mysql_size/img/mysql_index_size-year.png)
-![mysql data size - year](https://raw.github.com/dsobon/munin-plugins/master/mysql_size/img/)
