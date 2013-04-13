@@ -27,18 +27,11 @@ screenshots
 -----------
 
 ![apache response count - day](https://raw.github.com/dsobon/munin-plugins/master/img/apache_response_count-day.png)
-![apache response count - year](https://raw.github.com/dsobon/munin-plugins/master/img/apache_response_count-year.png)
-![apache response http status - day](https://raw.github.com/dsobon/munin-plugins/master/img/apache_response_http_status-day.png)
 ![apache response http status - year](https://raw.github.com/dsobon/munin-plugins/master/img/apache_response_http_status-year.png)
-![apache response time max - day](https://raw.github.com/dsobon/munin-plugins/master/img/apache_response_time_max-day.png)
 ![apache response time max - year](https://raw.github.com/dsobon/munin-plugins/master/img/apache_response_time_max-year.png)
 ![apache response time percentile dynamic - month](https://raw.github.com/dsobon/munin-plugins/master/img/apache_response_time_percentile_dynamic-month.png)
-![apache response time percentile dynamic - year](https://raw.github.com/dsobon/munin-plugins/master/img/apache_response_time_percentile_dynamic-year.png)
-![apache response time percentile static - day](https://raw.github.com/dsobon/munin-plugins/master/img/apache_response_time_percentile_static-day.png)
 ![apache response time percentile static - year](https://raw.github.com/dsobon/munin-plugins/master/img/apache_response_time_percentile_static-year.png)
-![apache response time total - day](https://raw.github.com/dsobon/munin-plugins/master/img/apache_response_time_total-day.png)
 ![apache response time total - year](https://raw.github.com/dsobon/munin-plugins/master/img/apache_response_time_total-year.png)
-
 
 installation
 ------------
